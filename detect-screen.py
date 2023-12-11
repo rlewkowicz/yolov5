@@ -35,10 +35,17 @@ import platform
 import sys
 from pathlib import Path
 
+from windows_capture import WindowsCapture, Frame, InternalCaptureControl
+
+# Every Error From on_closed and on_frame_arrived Will End Up Here
+capture = WindowsCapture(
+    capture_cursor=None,
+    draw_border=None,
+    monitor_index=None,
+    window_name=None,
+)
 
 import torch
-
-
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
@@ -54,8 +61,12 @@ from utils.general import (LOGGER, Profile, check_file, check_img_size, check_im
                            increment_path, non_max_suppression, print_args, scale_boxes, strip_optimizer, xyxy2xywh)
 from utils.torch_utils import select_device, smart_inference_mode
 
+
 @smart_inference_mode()
-def run(
+@capture.event
+def on_frame_arrived(
+        frame: Frame,
+        capture_control: InternalCaptureControl,
         weights=ROOT / 'yolov5s.pt',  # model path or triton URL
         source=ROOT / 'data/images',  # file/dir/URL/glob/screen/0(webcam)
         data=ROOT / 'data/coco128.yaml',  # dataset.yaml path
@@ -69,7 +80,7 @@ def run(
         save_csv=False,  # save results in CSV format
         save_conf=False,  # save confidences in --save-txt labels
         save_crop=False,  # save cropped prediction boxes
-        nosave=True,  # do not save images/videos
+        nosave=False,  # do not save images/videos
         classes=None,  # filter by class: --class 0, or --class 0 2 3
         agnostic_nms=False,  # class-agnostic NMS
         augment=False,  # augmented inference
@@ -97,7 +108,6 @@ def run(
     # Directories
     save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
     (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
-    LOGGER.info("loading device")
 
     # Load model
     device = select_device(device)
@@ -107,14 +117,19 @@ def run(
 
     # Dataloader
     bs = 1  # batch_size
-    LOGGER.info("loading sc")
-    dataset = LoadScreenshots(source, img_size=imgsz, stride=stride, auto=pt)
+    if webcam:
+        view_img = check_imshow(warn=True)
+        dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride)
+        bs = len(dataset)
+    elif screenshot:
+        dataset = LoadScreenshots(source, img_size=imgsz, stride=stride, auto=pt)
+    else:
+        dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride)
     vid_path, vid_writer = [None] * bs, [None] * bs
 
     # Run inference
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
     seen, windows, dt = 0, [], (Profile(), Profile(), Profile())
-    LOGGER.info("starting dataset")
     for path, im, im0s, vid_cap, s in dataset:
         with dt[0]:
             im = torch.from_numpy(im).to(model.device)

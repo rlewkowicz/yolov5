@@ -16,6 +16,7 @@ from itertools import repeat
 from multiprocessing.pool import Pool, ThreadPool
 from pathlib import Path
 from threading import Thread
+import threading
 from urllib.parse import urlparse
 
 import numpy as np
@@ -35,6 +36,41 @@ from utils.general import (DATASETS_DIR, LOGGER, NUM_THREADS, TQDM_BAR_FORMAT, c
                            xywh2xyxy, xywhn2xyxy, xyxy2xywhn)
 from utils.torch_utils import torch_distributed_zero_first
 
+from windows_capture import WindowsCapture, Frame, InternalCaptureControl
+
+capture = WindowsCapture(
+    capture_cursor=None,
+    draw_border=False,
+    monitor_index=None,
+    window_name=None,
+)
+
+persistent_object = type('', (), {})()
+persistent_object.screen = ""
+persistent_object.fresh = False
+persistent_object.lock = threading.Lock()
+
+@capture.event
+def on_frame_arrived(frame: Frame, capture_control: InternalCaptureControl):
+    with persistent_object.lock:
+        persistent_object.screen = frame
+        persistent_object.fresh = True
+
+@capture.event
+def on_closed():
+    print("Capture Session Closed")
+
+def dont_block(f):
+    def wrap(*args):
+        threading.Thread(target=f, args=args, daemon=True).start()
+    return wrap
+
+@dont_block
+def start():
+    capture.start()
+
+start()
+print("cap started")
 # Parameters
 HELP_URL = 'See https://docs.ultralytics.com/yolov5/tutorials/train_custom_data'
 IMG_FORMATS = 'bmp', 'dng', 'jpeg', 'jpg', 'mpo', 'png', 'tif', 'tiff', 'webp', 'pfm'  # include image suffixes
@@ -190,10 +226,7 @@ class _RepeatSampler:
 class LoadScreenshots:
     # YOLOv5 screenshot dataloader, i.e. `python detect.py --source "screen 0 100 100 512 256"`
     def __init__(self, source, img_size=640, stride=32, auto=True, transforms=None):
-        # source = [screen_number left top width height] (pixels)
-        check_requirements('mss')
-        import mss
-
+        print("lsc start")
         source, *params = source.split()
         self.screen, left, top, width, height = 0, None, None, None, None  # default to full screen 0
         if len(params) == 1:
@@ -208,24 +241,15 @@ class LoadScreenshots:
         self.auto = auto
         self.mode = 'stream'
         self.frame = 0
-        self.sct = mss.mss()
-
-        # Parse monitor shape
-        monitor = self.sct.monitors[self.screen]
-        self.top = monitor['top'] if top is None else (monitor['top'] + top)
-        self.left = monitor['left'] if left is None else (monitor['left'] + left)
-        self.width = width or monitor['width']
-        self.height = height or monitor['height']
-        self.monitor = {'left': self.left, 'top': self.top, 'width': self.width, 'height': self.height}
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        # mss screen capture: get raw pixels from the screen as np array
-        im0 = np.array(self.sct.grab(self.monitor))[:, :, :3]  # [:, :, :3] BGRA to BGR
+        with persistent_object.lock:
+            persistent_object.screen.to_bgr()
+            im0 = persistent_object.screen.frame_buffer 
         s = f'screen {self.screen} (LTWH): {self.left},{self.top},{self.width},{self.height}: '
-
         if self.transforms:
             im = self.transforms(im0)  # transforms
         else:
